@@ -313,7 +313,7 @@ tr:hover td{background:var(--surface2);}
   <div class="modal">
     <div class="modal-title">📦 إضافة مشتريات</div>
     <input type="hidden" id="p-editId" value="">
-    <div class="form-group"><label>اسم الصنف</label><input type="text" id="p-name" placeholder="مثال: انسيال"></div>
+    <div class="form-group"><label>اسم الصنف</label><input type="text" id="p-name" placeholder="مثال: انسيال" list="purchaseNamesList" autocomplete="off"><datalist id="purchaseNamesList"></datalist></div>
     <div class="form-row">
       <div class="form-group"><label>عدد القطع</label><input type="number" id="p-qty" placeholder="0" min="0"></div>
       <div class="form-group"><label>سعر الجملة</label><input type="number" id="p-cost" placeholder="0" min="0"></div>
@@ -639,7 +639,9 @@ function renderAds(){
 
 function updateSaleNameList(){
   const names=[...new Set(db.purchases.map(p=>p.name))];
-  document.getElementById('stockNamesList').innerHTML=names.map(n=>`<option value="${n}">`).join('');
+  const opts=names.map(n=>`<option value="${n}">`).join('');
+  document.getElementById('stockNamesList').innerHTML=opts;
+  document.getElementById('purchaseNamesList').innerHTML=opts;
 }
 
 // ══ ORDER MODAL ══
