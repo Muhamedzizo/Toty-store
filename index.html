@@ -670,14 +670,23 @@ function addOrderItemRow(existing=null){
   const names=[...new Set(db.purchases.map(p=>p.name))];
   const div=document.createElement('div');
   div.className='order-item-entry'; div.id='oi-'+id;
+  const isNew = existing && !names.includes(existing.name);
   div.innerHTML=`<button class="remove-item-btn" onclick="document.getElementById('oi-${id}').remove();updateOrderCalc()">✕</button>
     <div class="form-row">
       <div class="form-group"><label>المنتج</label>
-        <select onchange="fillOrderItemPrice(this,${id})" id="oi-name-${id}">
-          <option value="">اختر</option>${names.map(n=>`<option value="${n}" ${existing?.name===n?'selected':''}>${n}</option>`).join('')}
+        <select onchange="fillOrderItemPrice(this,${id})" id="oi-sel-${id}">
+          <option value="">اختر</option>
+          ${names.map(n=>`<option value="${n}" ${existing?.name===n?'selected':''}>${n}</option>`).join('')}
+          <option value="__new__" ${isNew?'selected':''}>➕ صنف جديد</option>
         </select>
       </div>
       <div class="form-group"><label>الكمية</label><input type="number" id="oi-qty-${id}" value="${existing?.qty||1}" min="1" oninput="updateOrderCalc()"></div>
+    </div>
+    <div id="oi-newfields-${id}" style="display:${isNew?'block':'none'}">
+      <div class="form-row">
+        <div class="form-group"><label>اسم الصنف الجديد</label><input type="text" id="oi-newname-${id}" value="${isNew?existing.name:''}" placeholder="اسم الصنف"></div>
+        <div class="form-group"><label>سعر الجملة (ج.م)</label><input type="number" id="oi-cost-${id}" value="${existing?.cost||''}" placeholder="0" min="0"></div>
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label>سعر البيع</label><input type="number" id="oi-price-${id}" value="${existing?.price||''}" placeholder="0" oninput="updateOrderCalc()"></div>
@@ -688,7 +697,14 @@ function addOrderItemRow(existing=null){
 }
 
 function fillOrderItemPrice(sel,id){
-  document.getElementById('oi-price-'+id).value=db.sellPrices[sel.value]||'';
+  const newFields = document.getElementById('oi-newfields-'+id);
+  if(sel.value==='__new__'){
+    newFields.style.display='block';
+    document.getElementById('oi-price-'+id).value='';
+  } else {
+    newFields.style.display='none';
+    document.getElementById('oi-price-'+id).value=db.sellPrices[sel.value]||'';
+  }
   updateOrderCalc();
 }
 
@@ -696,10 +712,18 @@ function getOrderItemsFromForm(){
   const items=[];
   document.querySelectorAll('.order-item-entry').forEach(div=>{
     const id=div.id.replace('oi-','');
-    const n=document.getElementById('oi-name-'+id);
+    const sel=document.getElementById('oi-sel-'+id);
     const q=document.getElementById('oi-qty-'+id);
     const p=document.getElementById('oi-price-'+id);
-    if(n?.value) items.push({name:n.value,qty:parseFloat(q?.value)||1,price:parseFloat(p?.value)||0});
+    if(!sel?.value) return;
+    let name=sel.value, cost=0, isNew=false;
+    if(sel.value==='__new__'){
+      name=(document.getElementById('oi-newname-'+id)?.value||'').trim();
+      cost=parseFloat(document.getElementById('oi-cost-'+id)?.value)||0;
+      isNew=true;
+      if(!name) return;
+    }
+    items.push({name,qty:parseFloat(q?.value)||1,price:parseFloat(p?.value)||0,cost,isNew});
   });
   return items;
 }
@@ -742,18 +766,47 @@ async function saveOrder(){
   const isDelivered=obj.status==='delivered';
   try{
     if(id){
+      // Restore old stock first, then deduct new
+      await restoreStockForOrder(oldOrder);
       await sb('PATCH','orders',obj,`?id=eq.${id}`);
       if(wasDelivered) await removeSalesForOrder(oldOrder);
+      await deductStockForOrder(obj);
     } else {
+      // New order: add new products to purchases first, then deduct stock
+      await addNewProductsToPurchases(items);
       await sb('POST','orders',obj,'');
+      await deductStockForOrder(obj);
     }
     if(isDelivered && !wasDelivered) await addSalesForOrder({...obj,customer});
     await loadAll(); closeModal('order');
     showToast(id?'تم التعديل ✅':'تمت الإضافة ✅');
   } catch(e){
-    // error toast already shown by sb(); keep modal open so user can retry
     console.error('saveOrder failed:', e);
   }
+}
+
+async function addNewProductsToPurchases(items){
+  const today = new Date().toISOString().substring(0,10);
+  for(const it of items){
+    if(it.isNew && it.name && it.cost>=0){
+      await sb('POST','purchases',{name:it.name,qty:it.qty,cost:it.cost,transport:0,date:today,notes:'من أوردر'},'');
+    }
+  }
+}
+
+async function deductStockForOrder(order){
+  // Add negative sales to represent stock deduction
+  const today = order.date || new Date().toISOString().substring(0,10);
+  const rows=(order.items||[]).map(it=>({
+    name:it.name, qty:it.qty, price:0,
+    date:today, notes:'حجز: '+(order.customer||''), source:'حجز'
+  }));
+  if(rows.length) await sb('POST','sales',rows,'');
+}
+
+async function restoreStockForOrder(order){
+  if(!order) return;
+  await sb('DELETE','sales','',`?source=eq.${encodeURIComponent('حجز')}&notes=eq.${encodeURIComponent('حجز: '+order.customer)}`);
 }
 
 async function addSalesForOrder(order){
@@ -777,6 +830,7 @@ async function deleteOrder(id){
   if(!confirm('تأكيد حذف الطلب؟')) return;
   const o=db.orders.find(x=>x.id===id);
   if(o?.status==='delivered') await removeSalesForOrder(o);
+  await restoreStockForOrder(o); // restore reserved stock
   await sb('DELETE','orders','',`?id=eq.${id}`);
   await loadAll(); showToast('تم الحذف');
 }
@@ -1042,7 +1096,9 @@ async function confirmCancelOrder(){
     },'');
   }
   
-  // 3. Mark order as cancelled
+  // 3. Restore reserved stock
+  await restoreStockForOrder(o);
+  // 4. Mark order as cancelled
   await sb('PATCH','orders',{status:'cancelled'},`?id=eq.${id}`);
   await loadAll();
   closeModal('cancel');
